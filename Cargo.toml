@@ -1,0 +1,22 @@
+[package]
+name = "slave-pool"
+version = "0.1.0"
+authors = ["Douman <douman@gmx.se>"]
+edition = "2018"
+license = "BSL-1.0"
+repository = "https://github.com/DoumanAsh/slave-pool"
+readme = "README.md"
+description = "Simple thread pool"
+include = [
+    "**/*.rs",
+    "Cargo.toml",
+    "README.md"
+]
+
+[dependencies.parking_lot]
+version = "0.10"
+default-features = false
+
+[dependencies.crossbeam-channel]
+version = "0.4"
+default-features = false
