@@ -12,6 +12,8 @@ include = [
     "Cargo.toml",
     "README.md"
 ]
+keywords = ["threadpool", "thread", "threading", "parallelism"]
+categories = ["concurrency"]
 
 [dependencies.parking_lot]
 version = "0.10"

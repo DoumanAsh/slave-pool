@@ -1,13 +1,54 @@
-//! Thread pool
+//! Simple thread pool
+//!
+//! # Example
+//!
+//! ```rust
+//! use slave_pool::ThreadPool;
+//! const SECOND: core::time::Duration = core::time::Duration::from_secs(1);
+//!
+//! static POOL: ThreadPool = ThreadPool::new();
+//!
+//! POOL.set_threads(8); //Tell how many threads you want
+//!
+//! let mut handles = Vec::new();
+//! for _ in 0..8 {
+//!     handles.push(POOL.spawn_handle(|| {
+//!         std::thread::sleep(SECOND);
+//!     }));
+//! }
+//!
+//! POOL.set_threads(0); //Tells to shut down threads
+//!
+//! for handle in handles {
+//!     assert!(handle.wait().is_ok()) //Even though we told  it to shutdown all threads, it is going to finish queued job first
+//! }
+//!
+//! let handle = POOL.spawn_handle(|| {});
+//! assert!(handle.wait_timeout(SECOND).is_err()); // All are shutdown now
+//!
+//! POOL.set_threads(1); //But let's add one more
+//!
+//! assert!(handle.wait().is_ok());
+//!
+//! let handle = POOL.spawn_handle(|| panic!("Oh no!")); // We can panic, if we want
+//!
+//! assert!(handle.wait().is_err()); // In that case we'll get error, but thread will be ok
+//!
+//! let handle = POOL.spawn_handle(|| {});
+//!
+//! POOL.set_threads(0);
+//!
+//! assert!(handle.wait().is_ok());
+//! ```
 
 #![warn(missing_docs)]
 #![cfg_attr(feature = "cargo-clippy", allow(clippy::style))]
 
 use std::{thread, io};
 
-use core::{ptr, time};
+use core::{ptr, time, fmt};
 use core::mem::MaybeUninit;
-use core::sync::atomic::{Ordering, AtomicU16, AtomicUsize};
+use core::sync::atomic::{Ordering, AtomicUsize};
 
 #[derive(Debug)]
 ///Describes possible reasons for join to fail
@@ -32,6 +73,12 @@ pub struct JobHandle<T> {
     inner: crossbeam_channel::Receiver<T>
 }
 
+impl<T> fmt::Debug for JobHandle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "JobHandle")
+    }
+}
+
 impl<T> JobHandle<T> {
     #[inline]
     ///Awaits for job to finish indefinitely.
@@ -54,6 +101,8 @@ enum Message {
 struct State {
     send: crossbeam_channel::Sender<Message>,
     recv: crossbeam_channel::Receiver<Message>,
+    //Use lock to serialize changes to threads
+    thread_num: parking_lot::RwLock<u16>,
 }
 
 ///Thread pool that allows to change number of threads at runtime.
@@ -75,7 +124,6 @@ struct State {
 ///Each thread wraps execution of job into `catch_unwind` to ensure that thread is not aborted
 ///on panic
 pub struct ThreadPool {
-    thread_num: AtomicU16,
     stack_size: AtomicUsize,
     name: &'static str,
     init_lock: parking_lot::Once,
@@ -85,13 +133,12 @@ pub struct ThreadPool {
 impl ThreadPool {
     ///Creates new thread pool with default params
     pub const fn new() -> Self {
-        Self::with_defaults(0, "", 0)
+        Self::with_defaults("", 0)
     }
 
     ///Creates new instance by specifying all params
-    pub const fn with_defaults(thread_num: u16, name: &'static str, stack_size: usize) -> Self {
+    pub const fn with_defaults(name: &'static str, stack_size: usize) -> Self {
         Self {
-            thread_num: AtomicU16::new(thread_num),
             stack_size: AtomicUsize::new(stack_size),
             name,
             init_lock: parking_lot::Once::new(),
@@ -106,6 +153,7 @@ impl ThreadPool {
                 ptr::write(self.state.as_ptr() as *mut State, State {
                     send,
                     recv,
+                    thread_num: parking_lot::RwLock::new(0),
                 });
             }
         });
@@ -115,6 +163,7 @@ impl ThreadPool {
         }
     }
 
+    #[inline]
     ///Sets stack size to use.
     ///
     ///By default it uses default value, used by Rust's stdlib.
@@ -122,26 +171,30 @@ impl ThreadPool {
     ///
     ///This setting takes effect only when creating new threads
     pub fn set_stack_size(&self, stack_size: usize) -> usize {
-        let old_stack_size = self.stack_size.load(Ordering::Acquire);
-        self.stack_size.store(stack_size, Ordering::Release);
-        old_stack_size
+        self.stack_size.swap(stack_size, Ordering::AcqRel)
     }
 
     ///Sets worker number, starting new threads if it is greater than previous
     ///
-    ///In case if it is less, then it shutdowns.
+    ///In case if it is less, extra threads are shut down.
     ///Returns previous number of threads.
     ///
-    ///By default no threads are started.
+    ///By default when pool is created no threads are started.
     ///
     ///If any thread fails to start, function returns immediately with error.
+    ///
+    ///# Note
+    ///
+    ///Any calls to this method are serialized, which means under hood it locks out
+    ///any attempt to change number of threads, until it is done
     pub fn set_threads(&self, thread_num: u16) -> io::Result<u16> {
-        let old_thread_num = self.thread_num.load(Ordering::Acquire);
-        self.thread_num.store(thread_num, Ordering::Release);
+        let state = self.get_state();
+
+        let mut state_thread_num = state.thread_num.write();
+        let old_thread_num = *state_thread_num;
+        *state_thread_num = thread_num;
 
         if old_thread_num > thread_num {
-            let state = self.get_state();
-
             let shutdown_num = old_thread_num - thread_num;
             for _ in 0..shutdown_num {
                 if state.send.send(Message::Shutdown).is_err() {
@@ -179,7 +232,7 @@ impl ThreadPool {
                 match result {
                     Ok(_) => (),
                     Err(error) => {
-                        self.thread_num.store(old_thread_num + num + 1, Ordering::Release);
+                        *state_thread_num = old_thread_num + num + 1;
                         return Err(error);
                     }
                 }
@@ -207,6 +260,12 @@ impl ThreadPool {
         JobHandle {
             inner: recv
         }
+    }
+}
+
+impl fmt::Debug for ThreadPool {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ThreadPool {{ threads: {} }}", self.get_state().thread_num.read())
     }
 }
 
