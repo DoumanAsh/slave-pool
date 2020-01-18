@@ -232,7 +232,7 @@ impl ThreadPool {
                 match result {
                     Ok(_) => (),
                     Err(error) => {
-                        *state_thread_num = old_thread_num + num + 1;
+                        *state_thread_num = old_thread_num + num;
                         return Err(error);
                     }
                 }
