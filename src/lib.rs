@@ -1,6 +1,6 @@
 //! Simple thread pool
 //!
-//! # Example
+//! # Usage
 //!
 //! ```rust
 //! use slave_pool::ThreadPool;
