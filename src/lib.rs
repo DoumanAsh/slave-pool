@@ -281,6 +281,7 @@ impl fmt::Debug for ThreadPool {
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
+        self.get_state();
         unsafe {
             ptr::drop_in_place(self.state.as_mut_ptr());
         }
