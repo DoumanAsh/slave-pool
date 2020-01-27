@@ -11,16 +11,17 @@
 //! POOL.set_threads(8); //Tell how many threads you want
 //!
 //! let mut handles = Vec::new();
-//! for _ in 0..8 {
-//!     handles.push(POOL.spawn_handle(|| {
+//! for idx in 0..8 {
+//!     handles.push(POOL.spawn_handle(move || {
 //!         std::thread::sleep(SECOND);
+//!         idx
 //!     }));
 //! }
 //!
 //! POOL.set_threads(0); //Tells to shut down threads
 //!
-//! for handle in handles {
-//!     assert!(handle.wait().is_ok()) //Even though we told  it to shutdown all threads, it is going to finish queued job first
+//! for (idx, handle) in handles.drain(..).enumerate() {
+//!     assert_eq!(handle.wait().unwrap(), idx) //Even though we told  it to shutdown all threads, it is going to finish queued job first
 //! }
 //!
 //! let handle = POOL.spawn_handle(|| {});
@@ -51,28 +52,22 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{Ordering, AtomicUsize, AtomicU16};
 
 mod spin;
+mod oneshot;
 
 #[derive(Debug)]
 ///Describes possible reasons for join to fail
 pub enum JoinError {
     ///Job wasn't finished and aborted.
-    Aborted,
+    Disconnect,
     ///Timeout expired, job continues.
     Timeout,
-}
-
-impl Into<JoinError> for crossbeam_channel::RecvTimeoutError {
-    fn into(self) -> JoinError {
-        match self {
-            crossbeam_channel::RecvTimeoutError::Timeout => JoinError::Timeout,
-            crossbeam_channel::RecvTimeoutError::Disconnected => JoinError::Aborted,
-        }
-    }
+    ///Job was already consumed
+    AlreadyConsumed,
 }
 
 ///Handle to the job, allowing to await for it to finish
 pub struct JobHandle<T> {
-    inner: crossbeam_channel::Receiver<T>
+    inner: oneshot::Receiver<T>
 }
 
 impl<T> fmt::Debug for JobHandle<T> {
@@ -85,13 +80,26 @@ impl<T> JobHandle<T> {
     #[inline]
     ///Awaits for job to finish indefinitely.
     pub fn wait(self) -> Result<T, JoinError> {
-        self.inner.recv().map_err(|_| JoinError::Aborted)
+        self.inner.recv()
     }
 
     #[inline]
     ///Awaits for job to finish for limited time.
     pub fn wait_timeout(&self, timeout: time::Duration) -> Result<T, JoinError> {
-        self.inner.recv_timeout(timeout).map_err(|err| err.into())
+        self.inner.recv_timeout(timeout)
+    }
+}
+
+impl<T> core::future::Future for JobHandle<T> {
+    type Output = Result<T, JoinError>;
+
+    #[inline]
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let inner = unsafe {
+            self.map_unchecked_mut(|this| &mut this.inner)
+        };
+
+        core::future::Future::poll(inner, cx)
     }
 }
 
@@ -253,12 +261,11 @@ impl ThreadPool {
 
     ///Schedules execution, that allows to await and receive it's result.
     pub fn spawn_handle<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(&self, job: F) -> JobHandle<R> {
-        let (send, recv) = crossbeam_channel::bounded(1);
-        let state = self.get_state();
+        let (send, recv) = oneshot::oneshot();
         let job = move || {
             let _ = send.send(job());
         };
-        let _ = state.send.send(Message::Execute(Box::new(job)));
+        let _ = self.get_state().send.send(Message::Execute(Box::new(job)));
 
         JobHandle {
             inner: recv
