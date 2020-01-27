@@ -47,10 +47,10 @@
 
 use std::{thread, io};
 
-use core::{ptr, time, fmt};
-use core::mem::MaybeUninit;
+use core::{time, fmt};
 use core::sync::atomic::{Ordering, AtomicUsize, AtomicU16};
 
+mod utils;
 mod spin;
 mod oneshot;
 
@@ -61,11 +61,20 @@ pub enum JoinError {
     Disconnect,
     ///Timeout expired, job continues.
     Timeout,
-    ///Job was already consumed
+    ///Job was already consumed.
+    ///
+    ///Only possible if handle successfully finished with `wait_timeout`
+    ///or via reference future.
     AlreadyConsumed,
 }
 
 ///Handle to the job, allowing to await for it to finish
+///
+///It provides methods to block current thread to wait for job to finish.
+///Alternatively the handle implements `Future` allowing it to be used in async context.
+///
+///Note that it is undesirable for it to be awaited from multiple threads,
+///therefore `Clone` is not implemented, even though it is possible
 pub struct JobHandle<T> {
     inner: oneshot::Receiver<T>
 }
@@ -113,6 +122,8 @@ struct State {
     recv: crossbeam_channel::Receiver<Message>,
 }
 
+unsafe impl Sync for ThreadPool {}
+
 ///Thread pool that allows to change number of threads at runtime.
 ///
 ///On `Drop` it instructs threads to shutdown, but doesn't await for them to finish
@@ -125,7 +136,8 @@ struct State {
 ///# Clone
 ///
 ///Thread pool intentionally doesn't implement `Clone`
-///If you want to share it, then share it by using global variable.
+///If you want to share it, then share it by using global variable or on heap.
+///It is thread safe, so concurrent access is allowed.
 ///
 ///# Panic
 ///
@@ -137,7 +149,10 @@ pub struct ThreadPool {
     thread_num_lock: spin::Lock,
     name: &'static str,
     init_lock: std::sync::Once,
-    state: MaybeUninit<State>,
+    //Option is fine as extra size goes from padding, so it
+    //doesn't increase overall size, but when changing layout
+    //consider to switch to MaybeUninit
+    state: core::cell::Cell<Option<State>>,
 }
 
 impl ThreadPool {
@@ -154,23 +169,22 @@ impl ThreadPool {
             thread_num_lock: spin::Lock::new(),
             name,
             init_lock: std::sync::Once::new(),
-            state: MaybeUninit::uninit(),
+            state: core::cell::Cell::new(None),
         }
     }
 
     fn get_state(&self) -> &State {
         self.init_lock.call_once(|| {
             let (send, recv) = crossbeam_channel::unbounded();
-            unsafe {
-                ptr::write(self.state.as_ptr() as *mut State, State {
-                    send,
-                    recv,
-                });
-            }
+            self.state.set(Some(State {
+                send,
+                recv,
+            }))
         });
 
-        unsafe {
-            &*self.state.as_ptr()
+        match unsafe { &*self.state.as_ptr() } {
+            Some(state) => state,
+            None => unreach!(),
         }
     }
 
@@ -276,14 +290,5 @@ impl ThreadPool {
 impl fmt::Debug for ThreadPool {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ThreadPool {{ threads: {} }}", self.thread_num.load(Ordering::Relaxed))
-    }
-}
-
-impl Drop for ThreadPool {
-    fn drop(&mut self) {
-        self.get_state();
-        unsafe {
-            ptr::drop_in_place(self.state.as_mut_ptr());
-        }
     }
 }
