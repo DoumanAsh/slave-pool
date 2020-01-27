@@ -70,13 +70,13 @@ impl<T> Sender<T> {
         self.payload.state.fetch_or(READY, Ordering::Release);
 
         if self.payload.state.load(Ordering::Acquire) & WAKER_SET == WAKER_SET {
-            self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
-
             match unsafe { self.payload.notifier().take() } {
                 Some(Notifier::Thread(thread)) => thread.unpark(),
                 Some(Notifier::Waker(waker)) => waker.wake(),
                 _ => unreachable!(),
             }
+
+            self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
         }
     }
 }
@@ -94,6 +94,8 @@ impl<T> Drop for Sender<T> {
                 Some(Notifier::Waker(waker)) => waker.wake(),
                 _ => unreachable!(),
             }
+
+            self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
         }
     }
 }
