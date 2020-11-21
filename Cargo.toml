@@ -1,6 +1,6 @@
 [package]
 name = "slave-pool"
-version = "0.2.2"
+version = "0.2.3"
 authors = ["Douman <douman@gmx.se>"]
 edition = "2018"
 license = "BSL-1.0"
@@ -16,5 +16,6 @@ keywords = ["threadpool", "thread", "threading", "parallelism"]
 categories = ["concurrency"]
 
 [dependencies.crossbeam-channel]
-version = "0.4"
+version = "0.5"
 default-features = false
+features = ["std"]
