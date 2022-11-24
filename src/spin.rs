@@ -18,7 +18,7 @@ impl Lock {
 
 impl Lock {
     fn obtain_lock(&self) {
-        while self.lock.compare_and_swap(false, true, Ordering::Acquire) != false {
+        while self.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Acquire).is_err() {
             // Wait until the lock looks unlocked before retrying
             while self.lock.load(Ordering::Relaxed) {
                 std::thread::yield_now();
