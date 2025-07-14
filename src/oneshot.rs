@@ -1,5 +1,5 @@
 use core::{time, ptr, task, pin};
-use core::cell::UnsafeCell;
+use core::cell::{Cell, UnsafeCell};
 use core::mem::MaybeUninit;
 use core::sync::atomic::{Ordering, AtomicU8};
 use core::future::Future;
@@ -20,7 +20,7 @@ enum Notifier {
 struct Payload<T> {
     state: AtomicU8,
     value: UnsafeCell<MaybeUninit<T>>,
-    notifier: UnsafeCell<Option<Notifier>>
+    notifier: Cell<Option<Notifier>>
 }
 
 unsafe impl<T> Send for Payload<T> {}
@@ -31,25 +31,17 @@ impl<T> Payload<T> {
         Self {
             state: AtomicU8::new(UNINIT),
             value: UnsafeCell::new(MaybeUninit::uninit()),
-            notifier: UnsafeCell::new(None),
+            notifier: Cell::new(None),
         }
-    }
-
-    unsafe fn value(&self) -> &mut MaybeUninit<T> {
-        &mut *self.value.get()
-    }
-
-    unsafe fn notifier(&self) -> &mut Option<Notifier> {
-        &mut *self.notifier.get()
     }
 }
 
 impl<T> Drop for Payload<T> {
     fn drop(&mut self) {
         let state = self.state.load(Ordering::Acquire);
-        match state & READY == READY && !(state & CONSUMED == CONSUMED) {
+        match (state & READY == READY) && (state & CONSUMED != CONSUMED) {
             true => unsafe {
-                ptr::drop_in_place(self.value().as_mut_ptr());
+                ptr::drop_in_place((*self.value.get()).as_mut_ptr());
             },
             _ => (),
         }
@@ -64,13 +56,13 @@ impl<T> Sender<T> {
     pub fn send(self, value: T) {
         //there is always only one sender
         unsafe {
-            ptr::write(self.payload.value().as_mut_ptr(), value);
+            ptr::write((*self.payload.value.get()).as_mut_ptr(), value);
         }
 
         self.payload.state.fetch_or(READY, Ordering::Release);
 
         if self.payload.state.load(Ordering::Acquire) & WAKER_SET == WAKER_SET {
-            match unsafe { self.payload.notifier().take() } {
+            match self.payload.notifier.take() {
                 Some(Notifier::Thread(thread)) => thread.unpark(),
                 Some(Notifier::Waker(waker)) => waker.wake(),
                 _ => unreachable!(),
@@ -83,13 +75,13 @@ impl<T> Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        if !(self.payload.state.load(Ordering::Acquire) & READY == READY) {
+        if self.payload.state.load(Ordering::Acquire) & READY != READY {
             //If we're already ready, closing here no longer matters
             self.payload.state.fetch_or(SEND_CLOSED, Ordering::Release);
         }
 
         if self.payload.state.load(Ordering::Acquire) & WAKER_SET == WAKER_SET {
-            match unsafe { self.payload.notifier().take() } {
+            match self.payload.notifier.take() {
                 Some(Notifier::Thread(thread)) => thread.unpark(),
                 Some(Notifier::Waker(waker)) => waker.wake(),
                 _ => unreachable!(),
@@ -110,7 +102,7 @@ impl<T> Receiver<T> {
         let mut result = MaybeUninit::uninit();
 
         unsafe {
-            ptr::swap(result.as_mut_ptr(), self.payload.value().as_mut_ptr());
+            ptr::swap(result.as_mut_ptr(), (*self.payload.value.get()).as_mut_ptr());
 
             result.assume_init()
         }
@@ -127,12 +119,10 @@ impl<T> Receiver<T> {
             return Err(JoinError::Disconnect);
         }
 
-        unsafe {
-            *self.payload.notifier() = Some(Notifier::Thread(std::thread::current()));
-        }
+        self.payload.notifier.set(Some(Notifier::Thread(std::thread::current())));
         self.payload.state.fetch_or(WAKER_SET, Ordering::Release);
 
-        while !(self.payload.state.load(Ordering::Acquire) & READY == READY) {
+        while self.payload.state.load(Ordering::Acquire) & READY != READY {
             std::thread::park();
 
             //We should wake up on drop, otherwise receiver is stuck
@@ -155,12 +145,10 @@ impl<T> Receiver<T> {
             return Err(JoinError::Disconnect);
         }
 
-        unsafe {
-            *self.payload.notifier() = Some(Notifier::Thread(std::thread::current()));
-        }
+        self.payload.notifier.set(Some(Notifier::Thread(std::thread::current())));
         self.payload.state.fetch_or(WAKER_SET, Ordering::Release);
 
-        if !(self.payload.state.load(Ordering::Acquire) & READY == READY) {
+        if self.payload.state.load(Ordering::Acquire) & READY != READY {
             std::thread::park_timeout(time);
         }
         self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
@@ -187,10 +175,8 @@ impl<T> Future for Receiver<T> {
             return task::Poll::Ready(Err(JoinError::Disconnect));
         }
 
-        if !(self.payload.state.load(Ordering::Acquire) & WAKER_SET == WAKER_SET) {
-            unsafe {
-                *self.payload.notifier() = Some(Notifier::Waker(cx.waker().clone()))
-            }
+        if self.payload.state.load(Ordering::Acquire) & WAKER_SET != WAKER_SET {
+            self.payload.notifier.set(Some(Notifier::Waker(cx.waker().clone())));
             self.payload.state.fetch_or(WAKER_SET, Ordering::Release);
         }
 

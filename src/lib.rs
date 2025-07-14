@@ -43,7 +43,7 @@
 //! ```
 
 #![warn(missing_docs)]
-#![cfg_attr(feature = "cargo-clippy", allow(clippy::style))]
+#![allow(clippy::style)]
 
 use std::{thread, io};
 
@@ -245,14 +245,11 @@ impl ThreadPool {
                     stack_size => builder.stack_size(stack_size),
                 };
 
-                let result = builder.spawn(move || loop { match recv.recv() {
-                    Ok(Message::Execute(job)) => {
-                        //TODO: for some reason closures has no impl, wonder why?
-                        let job = std::panic::AssertUnwindSafe(job);
-                        let _ = std::panic::catch_unwind(|| (job.0)());
-                    },
-                    Ok(Message::Shutdown) | Err(_) => break,
-                }});
+                let result = builder.spawn(move || while let Ok(Message::Execute(job)) = recv.recv() {
+                    //TODO: for some reason closures has no impl, wonder why?
+                    let job = std::panic::AssertUnwindSafe(job);
+                    let _ = std::panic::catch_unwind(|| (job.0)());
+                });
 
                 match result {
                     Ok(_) => (),
