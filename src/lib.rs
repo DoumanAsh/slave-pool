@@ -148,11 +148,7 @@ pub struct ThreadPool {
     thread_num: AtomicU16,
     thread_num_lock: spin::Lock,
     name: &'static str,
-    init_lock: std::sync::Once,
-    //Option is fine as extra size goes from padding, so it
-    //doesn't increase overall size, but when changing layout
-    //consider to switch to MaybeUninit
-    state: core::cell::Cell<Option<State>>,
+    once_state: std::sync::OnceLock<State>,
 }
 
 impl ThreadPool {
@@ -168,24 +164,18 @@ impl ThreadPool {
             thread_num: AtomicU16::new(0),
             thread_num_lock: spin::Lock::new(),
             name,
-            init_lock: std::sync::Once::new(),
-            state: core::cell::Cell::new(None),
+            once_state: std::sync::OnceLock::new(),
         }
     }
 
     fn get_state(&self) -> &State {
-        self.init_lock.call_once(|| {
+        self.once_state.get_or_init(|| {
             let (send, recv) = crossbeam_channel::unbounded();
-            self.state.set(Some(State {
+            State {
                 send,
-                recv,
-            }))
-        });
-
-        match unsafe { &*self.state.as_ptr() } {
-            Some(state) => state,
-            None => unreach!(),
-        }
+                recv
+            }
+        })
     }
 
     #[inline]
@@ -285,7 +275,8 @@ impl ThreadPool {
 }
 
 impl fmt::Debug for ThreadPool {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ThreadPool {{ threads: {} }}", self.thread_num.load(Ordering::Relaxed))
+    #[inline(always)]
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.write_fmt(format_args!("ThreadPool {{ threads: {} }}", self.thread_num.load(Ordering::Relaxed)))
     }
 }
