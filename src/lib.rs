@@ -40,6 +40,7 @@
 //! POOL.set_threads(0);
 //!
 //! assert!(handle.wait().is_ok());
+//! std::thread::sleep(SECOND);
 //! ```
 
 #![warn(missing_docs)]
@@ -158,11 +159,13 @@ pub struct ThreadPool {
 }
 
 impl ThreadPool {
+    #[inline(always)]
     ///Creates new thread pool with default params
     pub const fn new() -> Self {
         Self::with_defaults("", 0)
     }
 
+    #[inline(always)]
     ///Creates new instance by specifying all params
     pub const fn with_defaults(name: &'static str, stack_size: usize) -> Self {
         Self {
@@ -195,6 +198,19 @@ impl ThreadPool {
         self.stack_size.swap(stack_size, Ordering::AcqRel)
     }
 
+    #[inline(always)]
+    fn prepare_thread_builder(&self) -> thread::Builder {
+        let mut result = thread::Builder::new();
+        if !self.name.is_empty() {
+            result = result.name(self.name.to_owned())
+        }
+        let stack_size = self.stack_size.load(Ordering::Relaxed);
+        if stack_size != 0 {
+            result = result.stack_size(stack_size)
+        }
+        result
+    }
+
     ///Sets worker number, starting new threads if it is greater than previous
     ///
     ///In case if it is less, extra threads are shut down.
@@ -209,9 +225,8 @@ impl ThreadPool {
     ///Any calls to this method are serialized, which means under hood it locks out
     ///any attempt to change number of threads, until it is done
     pub fn set_threads(&self, thread_num: u16) -> io::Result<u16> {
-        let mut _guard = self.thread_num_lock.lock();
-        let old_thread_num = self.thread_num.load(Ordering::Relaxed);
-        self.thread_num.store(thread_num, Ordering::Relaxed);
+        let _guard = self.thread_num_lock.lock();
+        let old_thread_num = self.thread_num.swap(thread_num, Ordering::Relaxed);
 
         if old_thread_num > thread_num {
             let state = self.get_state();
@@ -225,22 +240,12 @@ impl ThreadPool {
 
         } else if thread_num > old_thread_num {
             let create_num = thread_num - old_thread_num;
-            let stack_size = self.stack_size.load(Ordering::Acquire);
             let state = self.get_state();
 
             for num in 0..create_num {
                 let recv = state.recv.clone();
 
-                let builder = match self.name {
-                    "" => thread::Builder::new(),
-                    name => thread::Builder::new().name(name.to_owned()),
-                };
-
-                let builder = match stack_size {
-                    0 => builder,
-                    stack_size => builder.stack_size(stack_size),
-                };
-
+                let builder = self.prepare_thread_builder();
                 let result = builder.spawn(move || while let Ok(Message::Execute(job)) = recv.recv() {
                     //TODO: for some reason closures has no impl, wonder why?
                     let job = std::panic::AssertUnwindSafe(job);
@@ -260,6 +265,27 @@ impl ThreadPool {
         Ok(old_thread_num)
     }
 
+    ///Terminates all threads and clears internal state
+    ///
+    ///Mutable access guarantees that only one writer can clear state without need of internal lock
+    pub fn shutdown(&mut self) {
+        let _guard = self.thread_num_lock.lock();
+        let old_thread_num = self.thread_num.swap(0, Ordering::Relaxed);
+
+        {
+            let state = self.get_state();
+
+            for _ in 0..old_thread_num {
+                if state.send.send(Message::Shutdown).is_err() {
+                    break;
+                }
+            }
+        }
+
+        //Take state and drop it
+        let _ = self.once_state.take();
+    }
+
     ///Schedules new execution, sending it over to one of the workers.
     pub fn spawn<F: FnOnce() + Send + 'static>(&self, job: F) {
         let state = self.get_state();
@@ -277,6 +303,13 @@ impl ThreadPool {
         JobHandle {
             inner: recv
         }
+    }
+}
+
+impl Drop for ThreadPool {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

@@ -155,3 +155,25 @@ fn should_handle_drop() {
     std::thread::sleep(MS * 100);
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 3);
 }
+
+#[test]
+fn should_shutdown_and_restart() {
+    let mut pool = ThreadPool::new();
+
+    assert_eq!(pool.set_threads(2).unwrap(), 0);
+
+    let handle = pool.spawn_handle(|| {
+        std::thread::sleep(core::time::Duration::from_millis(100));
+        10
+    });
+
+    pool.shutdown();
+
+    assert_eq!(pool.set_threads(2).unwrap(), 0);
+
+    assert_eq!(handle.wait().expect("success"), 10);
+
+    pool.shutdown();
+
+    std::thread::sleep(MS * 100);
+}
