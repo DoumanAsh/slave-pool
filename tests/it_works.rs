@@ -126,7 +126,7 @@ fn should_handle_drop() {
 
     assert_eq!(pool.set_threads(1).unwrap(), 0);
 
-    std::thread::sleep(MS * 100);
+    std::thread::sleep(MS * 250);
 
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 1);
 
@@ -134,7 +134,7 @@ fn should_handle_drop() {
         guard2
     });
 
-    std::thread::sleep(MS * 100);
+    std::thread::sleep(MS * 250);
     drop(handle);
 
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 2);
@@ -144,7 +144,7 @@ fn should_handle_drop() {
         guard3
     });
 
-    std::thread::sleep(MS * 100);
+    std::thread::sleep(MS * 250);
     drop(handle);
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 2);
 

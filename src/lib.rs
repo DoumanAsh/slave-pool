@@ -46,9 +46,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::style)]
 
-use std::{thread, io};
-
-use core::{time, fmt};
+use std::{thread, io, sync};
+use core::{time, fmt, ops};
 use core::sync::atomic::{Ordering, AtomicUsize, AtomicU16};
 
 mod utils;
@@ -124,9 +123,27 @@ enum Message {
     Shutdown,
 }
 
+//Since 1.67 mpsc uses mpmc under the hood so override shitty !Sync
+//Unfortunately it is also not transparent so I cannot transmute it into underlying mpmc for
+//purpose of clone, hence it would require to be wrapped into Arc
+struct Receiver<T>(pub sync::mpsc::Receiver<T>);
+
+unsafe impl<T: Send> Sync for Receiver<T> {
+}
+unsafe impl<T: Send> Send for Receiver<T> {
+}
+
+impl<T> ops::Deref for Receiver<T> {
+    type Target = sync::mpsc::Receiver<T>;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 struct State {
-    send: crossbeam_channel::Sender<Message>,
-    recv: crossbeam_channel::Receiver<Message>,
+    send: sync::mpsc::Sender<Message>,
+    recv: sync::Arc<Receiver<Message>>,
 }
 
 unsafe impl Sync for ThreadPool {}
@@ -179,10 +196,10 @@ impl ThreadPool {
 
     fn get_state(&self) -> &State {
         self.once_state.get_or_init(|| {
-            let (send, recv) = crossbeam_channel::unbounded();
+            let (send, recv) = sync::mpsc::channel();
             State {
                 send,
-                recv
+                recv: sync::Arc::new(Receiver(recv)),
             }
         })
     }
@@ -231,7 +248,7 @@ impl ThreadPool {
         if old_thread_num > thread_num {
             let state = self.get_state();
 
-            let shutdown_num = old_thread_num - thread_num;
+            let shutdown_num = old_thread_num.saturating_sub(thread_num);
             for _ in 0..shutdown_num {
                 if state.send.send(Message::Shutdown).is_err() {
                     break;
@@ -239,7 +256,7 @@ impl ThreadPool {
             }
 
         } else if thread_num > old_thread_num {
-            let create_num = thread_num - old_thread_num;
+            let create_num = thread_num.saturating_sub(old_thread_num);
             let state = self.get_state();
 
             for num in 0..create_num {
@@ -255,7 +272,7 @@ impl ThreadPool {
                 match result {
                     Ok(_) => (),
                     Err(error) => {
-                        self.thread_num.store(old_thread_num + num, Ordering::Relaxed);
+                        self.thread_num.store(old_thread_num.saturating_add(num), Ordering::Relaxed);
                         return Err(error);
                     }
                 }
