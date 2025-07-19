@@ -1,8 +1,10 @@
 use core::time;
+use core::sync::atomic;
 use std::collections::HashSet;
 
 use slave_pool::{ThreadPool, JoinError};
 
+const MS: time::Duration = time::Duration::from_millis(1);
 const SECOND: time::Duration = time::Duration::from_secs(1);
 
 #[test]
@@ -90,4 +92,66 @@ fn should_spawn_and_over_capacity() {
             assert_eq!(handle.try_wait().unwrap_err(), JoinError::AlreadyConsumed);
         }
     }
+}
+
+#[test]
+fn should_handle_drop() {
+    #[derive(Clone, Debug)]
+    struct Guard {
+        state: std::sync::Arc<atomic::AtomicUsize>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.state.fetch_add(1, atomic::Ordering::SeqCst);
+        }
+    }
+    let guard = Guard {
+        state: std::sync::Arc::new(atomic::AtomicUsize::new(0))
+    };
+    let guard1 = guard.clone();
+    let guard2 = guard.clone();
+    let guard3 = guard.clone();
+
+    let pool = ThreadPool::new();
+    let handle = pool.spawn_handle(move || {
+        guard1
+    });
+    assert_eq!(handle.wait_timeout(MS).unwrap_err(), JoinError::Timeout);
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
+
+    drop(handle);
+
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
+
+    assert_eq!(pool.set_threads(1).unwrap(), 0);
+
+    std::thread::sleep(MS * 100);
+
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 1);
+
+    let handle = pool.spawn_handle(move || {
+        guard2
+    });
+
+    std::thread::sleep(MS * 100);
+    drop(handle);
+
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 2);
+
+    let handle = pool.spawn_handle(move || {
+        std::thread::sleep(MS * 500);
+        guard3
+    });
+
+    std::thread::sleep(MS * 100);
+    drop(handle);
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 2);
+
+    std::thread::sleep(MS * 500);
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 3);
+
+    assert_eq!(pool.set_threads(0).unwrap(), 1);
+    std::thread::sleep(MS * 100);
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 3);
 }
