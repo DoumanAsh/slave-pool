@@ -23,9 +23,6 @@ struct Payload<T> {
     notifier: Cell<Option<Notifier>>
 }
 
-unsafe impl<T> Send for Payload<T> {}
-unsafe impl<T> Sync for Payload<T> {}
-
 impl<T> Payload<T> {
     const fn new() -> Self {
         Self {
@@ -59,38 +56,43 @@ impl<T> Sender<T> {
             ptr::write((*self.payload.value.get()).as_mut_ptr(), value);
         }
 
-        self.payload.state.fetch_or(READY, Ordering::Release);
+        let state = self.payload.state.fetch_or(READY, Ordering::AcqRel);
+        if state & WAKER_SET == WAKER_SET {
+            let notifier = self.payload.notifier.take();
+            self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
 
-        if self.payload.state.load(Ordering::Acquire) & WAKER_SET == WAKER_SET {
-            match self.payload.notifier.take() {
+            match notifier {
                 Some(Notifier::Thread(thread)) => thread.unpark(),
                 Some(Notifier::Waker(waker)) => waker.wake(),
                 _ => unreachable!(),
             }
-
-            self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
         }
     }
 }
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        if self.payload.state.load(Ordering::Acquire) & READY != READY {
+        let state = self.payload.state.load(Ordering::Acquire);
+        if state & READY != READY {
             //If we're already ready, closing here no longer matters
             self.payload.state.fetch_or(SEND_CLOSED, Ordering::Release);
         }
 
-        if self.payload.state.load(Ordering::Acquire) & WAKER_SET == WAKER_SET {
-            match self.payload.notifier.take() {
+        if state & WAKER_SET == WAKER_SET {
+            let notifier = self.payload.notifier.take();
+            self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
+
+            match notifier {
                 Some(Notifier::Thread(thread)) => thread.unpark(),
                 Some(Notifier::Waker(waker)) => waker.wake(),
                 _ => unreachable!(),
             }
-
-            self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
         }
     }
 }
+
+unsafe impl<T> Send for Sender<T> {}
+unsafe impl<T> Sync for Sender<T> {}
 
 pub struct Receiver<T> {
     payload: std::sync::Arc<Payload<T>>,
@@ -108,8 +110,22 @@ impl<T> Receiver<T> {
         }
     }
 
-    pub fn recv(self) -> Result<T, JoinError> {
+    pub fn try_recv(&self) -> Result<Option<T>, JoinError> {
         let state = self.payload.state.load(Ordering::Acquire);
+
+        if state & CONSUMED == CONSUMED {
+            Err(JoinError::AlreadyConsumed)
+        } else if state & READY == READY {
+            Ok(Some(self.consume()))
+        } else if state & SEND_CLOSED == SEND_CLOSED {
+            Err(JoinError::Disconnect)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn recv(self) -> Result<T, JoinError> {
+        let mut state = self.payload.state.load(Ordering::Acquire);
 
         if state & CONSUMED == CONSUMED {
             return Err(JoinError::AlreadyConsumed);
@@ -120,22 +136,24 @@ impl<T> Receiver<T> {
         }
 
         self.payload.notifier.set(Some(Notifier::Thread(std::thread::current())));
-        self.payload.state.fetch_or(WAKER_SET, Ordering::Release);
+        state = self.payload.state.fetch_or(WAKER_SET, Ordering::AcqRel);
 
-        while self.payload.state.load(Ordering::Acquire) & READY != READY {
-            std::thread::park();
-
-            //We should wake up on drop, otherwise receiver is stuck
-            if self.payload.state.load(Ordering::Acquire) & SEND_CLOSED == SEND_CLOSED {
+        while state & READY != READY {
+            //Make sure we're not dropped yet
+            if state & SEND_CLOSED == SEND_CLOSED {
                 return Err(JoinError::Disconnect);
             }
+
+            std::thread::park();
+
+            state = self.payload.state.load(Ordering::Acquire);
         }
 
         Ok(self.consume())
     }
 
     pub fn recv_timeout(&self, time: time::Duration) -> Result<T, JoinError> {
-        let state = self.payload.state.load(Ordering::Acquire);
+        let mut state = self.payload.state.load(Ordering::Acquire);
 
         if state & CONSUMED == CONSUMED {
             return Err(JoinError::AlreadyConsumed);
@@ -146,14 +164,14 @@ impl<T> Receiver<T> {
         }
 
         self.payload.notifier.set(Some(Notifier::Thread(std::thread::current())));
-        self.payload.state.fetch_or(WAKER_SET, Ordering::Release);
+        state = self.payload.state.fetch_or(WAKER_SET, Ordering::AcqRel);
 
-        if self.payload.state.load(Ordering::Acquire) & READY != READY {
+        if state & READY != READY {
             std::thread::park_timeout(time);
         }
-        self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
+        state = self.payload.state.fetch_and(!WAKER_SET, Ordering::AcqRel);
 
-        if self.payload.state.load(Ordering::Acquire) & READY == READY {
+        if state & READY == READY {
             Ok(self.consume())
         } else {
             Err(JoinError::Timeout)
@@ -165,7 +183,7 @@ impl<T> Future for Receiver<T> {
     type Output = Result<T, JoinError>;
 
     fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        let state = self.payload.state.load(Ordering::Acquire);
+        let mut state = self.payload.state.load(Ordering::Acquire);
 
         if state & CONSUMED == CONSUMED {
             return task::Poll::Ready(Err(JoinError::AlreadyConsumed));
@@ -175,15 +193,16 @@ impl<T> Future for Receiver<T> {
             return task::Poll::Ready(Err(JoinError::Disconnect));
         }
 
-        if self.payload.state.load(Ordering::Acquire) & WAKER_SET != WAKER_SET {
+        if state & WAKER_SET != WAKER_SET {
             self.payload.notifier.set(Some(Notifier::Waker(cx.waker().clone())));
             self.payload.state.fetch_or(WAKER_SET, Ordering::Release);
         }
 
         //Just in case double-check
-        if self.payload.state.load(Ordering::Acquire) & SEND_CLOSED == SEND_CLOSED {
+        state = self.payload.state.load(Ordering::Acquire);
+        if state & SEND_CLOSED == SEND_CLOSED {
             task::Poll::Ready(Err(JoinError::Disconnect))
-        } else if self.payload.state.load(Ordering::Acquire) & READY == READY {
+        } else if state & READY == READY {
             self.payload.state.fetch_and(!WAKER_SET, Ordering::Release);
             task::Poll::Ready(Ok(self.consume()))
         } else {
@@ -191,6 +210,12 @@ impl<T> Future for Receiver<T> {
         }
     }
 }
+
+unsafe impl<T: Send> Send for Receiver<T> {}
+impl<T> Unpin for Receiver<T> {}
+
+//Impossible to guarantee as we need to write waker without lock
+//unsafe impl<T> Sync for Receiver<T> {}
 
 pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
     let payload = std::sync::Arc::new(Payload::new());

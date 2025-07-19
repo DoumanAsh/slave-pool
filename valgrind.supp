@@ -1,0 +1,13 @@
+{
+   rust_compiler_leak_error_on_panic_in_rt
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:*thread*current*init_current*
+   ...
+   fun:*run_tests_console*
+   ...
+   fun:*rt*lang_start*
+   fun:*rt*lang_start_internal*
+}

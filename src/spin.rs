@@ -28,7 +28,7 @@ impl Lock {
     }
 
     #[inline(always)]
-    pub fn lock(&self) -> LockGuard {
+    pub fn lock(&self) -> LockGuard<'_> {
         self.obtain_lock();
         LockGuard {
             lock: &self.lock,

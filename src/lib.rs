@@ -54,7 +54,7 @@ mod utils;
 mod spin;
 mod oneshot;
 
-#[derive(Debug)]
+#[derive(PartialEq, Eq, Debug)]
 ///Describes possible reasons for join to fail
 pub enum JoinError {
     ///Job wasn't finished and aborted.
@@ -63,8 +63,7 @@ pub enum JoinError {
     Timeout,
     ///Job was already consumed.
     ///
-    ///Only possible if handle successfully finished with `wait_timeout`
-    ///or via reference future.
+    ///Only possible if handle successfully finished with one of the `wait` or via reference future.
     AlreadyConsumed,
 }
 
@@ -73,19 +72,26 @@ pub enum JoinError {
 ///It provides methods to block current thread to wait for job to finish.
 ///Alternatively the handle implements `Future` allowing it to be used in async context.
 ///
-///Note that it is undesirable for it to be awaited from multiple threads,
-///therefore `Clone` is not implemented, even though it is possible
+///It is impossible to await this handle from multiple threads at the same time as it would require
+///locking, hence `Clone` is not implemented even though under the hood it is shared pointer.
 pub struct JobHandle<T> {
     inner: oneshot::Receiver<T>
 }
 
 impl<T> fmt::Debug for JobHandle<T> {
+    #[inline(always)]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "JobHandle")
     }
 }
 
 impl<T> JobHandle<T> {
+    #[inline]
+    ///Attempts to check of job is ready
+    pub fn try_wait(&self) -> Result<Option<T>, JoinError> {
+        self.inner.try_recv()
+    }
+
     #[inline]
     ///Awaits for job to finish indefinitely.
     pub fn wait(self) -> Result<T, JoinError> {
