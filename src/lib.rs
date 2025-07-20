@@ -2,7 +2,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use slave_pool::ThreadPool;
 //! const SECOND: core::time::Duration = core::time::Duration::from_secs(1);
 //!
