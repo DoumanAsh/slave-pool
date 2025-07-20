@@ -1,3 +1,4 @@
+//! Underlying oneshot implementation
 use core::{time, ptr, task, pin};
 use core::cell::{Cell, UnsafeCell};
 use core::mem::MaybeUninit;
@@ -67,6 +68,9 @@ impl<T> Drop for Payload<T> {
     }
 }
 
+///Sender end, allows to send message once
+///
+///On `Drop` will notify `Receiver`
 pub struct Sender<T> {
     payload: ptr::NonNull<Payload<T>>,
 }
@@ -79,6 +83,7 @@ impl<T> Sender<T> {
         }
     }
 
+    ///Performs send of the message, waking receiver, if it awaits
     pub fn send(self, value: T) {
         //there is always only one sender
         unsafe {
@@ -123,9 +128,12 @@ impl<T> Drop for Sender<T> {
     }
 }
 
-unsafe impl<T> Send for Sender<T> {}
-unsafe impl<T> Sync for Sender<T> {}
+unsafe impl<T: Send> Send for Sender<T> {}
+unsafe impl<T: Sync> Sync for Sender<T> {}
 
+///Receiver end to receive message
+///
+///Implements `Future`
 pub struct Receiver<T> {
     payload: ptr::NonNull<Payload<T>>,
 }
@@ -149,6 +157,8 @@ impl<T> Receiver<T> {
         }
     }
 
+    ///Checks if message is received, returning it, if possible
+    ///Otherwise returns `None`
     pub fn try_recv(&self) -> Result<Option<T>, JoinError> {
         let state = self.payload().state.load(Ordering::Acquire);
 
@@ -163,6 +173,8 @@ impl<T> Receiver<T> {
         }
     }
 
+    ///Awaits message blocking until message arrives, returning it
+    ///Or if `Sender` closes unexpectedly (e.g. due to panic) returns `JoinError::Disconnect`
     pub fn recv(self) -> Result<T, JoinError> {
         let mut state = self.payload().state.load(Ordering::Acquire);
 
@@ -190,6 +202,10 @@ impl<T> Receiver<T> {
         Ok(self.consume())
     }
 
+    ///Awaits message blocking for the duration of `time` until message arrives, returning it
+    ///Or if `Sender` closes unexpectedly (e.g. due to panic) returns `JoinError::Disconnect`
+    ///
+    ///If timeout expires, returns error `JoinError::Timeout`
     pub fn recv_timeout(&self, time: time::Duration) -> Result<T, JoinError> {
         let mut state = self.payload().state.load(Ordering::Acquire);
 
@@ -271,6 +287,7 @@ impl<T> Unpin for Receiver<T> {}
 //Impossible to guarantee as we need to write waker without lock
 //unsafe impl<T> Sync for Receiver<T> {}
 
+///Creates new oneshot pipe
 pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
     let payload = ptr::NonNull::from(Box::leak(Box::new(Payload::new())));
 

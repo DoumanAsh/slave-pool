@@ -52,7 +52,7 @@ use core::sync::atomic::{Ordering, AtomicUsize, AtomicU16};
 
 mod utils;
 mod spin;
-mod oneshot;
+pub mod oneshot;
 
 #[derive(PartialEq, Eq, Debug)]
 ///Describes possible reasons for join to fail
