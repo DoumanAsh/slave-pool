@@ -247,10 +247,11 @@ impl<T> Future for Receiver<T> {
             return task::Poll::Ready(Err(JoinError::Disconnect));
         }
 
-        if state & WAKER_SET != WAKER_SET {
-            state = self.payload().set_notifier(Notifier::Waker(cx.waker().clone()));
-        } else {
+        //Account for spontaneous wake up
+        if state & WAKER_SET == WAKER_SET {
             state = self.payload().state.load(Ordering::Acquire);
+        } else {
+            state = self.payload().set_notifier(Notifier::Waker(cx.waker().clone()));
         }
 
         //Just in case double-check
