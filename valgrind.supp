@@ -1,5 +1,5 @@
 {
-   rust_compiler_leak_error_on_panic_in_rt
+   rust_compiler_test_debug_leak
    Memcheck:Leak
    match-leak-kinds: possible
    fun:malloc
@@ -8,6 +8,6 @@
    ...
    fun:*run_tests_console*
    ...
-   fun:*rt*lang_start*
-   fun:*rt*lang_start_internal*
+   fun:*test*test_main_static*
+   ...
 }

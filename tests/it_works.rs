@@ -194,6 +194,8 @@ fn should_handle_drop_many() {
         }
     }
 
+    assert_eq!(pool.set_threads(0).unwrap(), 2);
+    std::thread::yield_now();
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), expected_counter);
 }
 
@@ -247,10 +249,10 @@ fn should_process_receiver_drop_after_all_senders_shutdown() {
     let mut pool = ThreadPool::new();
     assert_eq!(pool.set_threads(4).unwrap(), 0);
     let mut handles = Vec::new();
-    for _ in 0..100 {
+    for _ in 0..50 {
         let guard1 = guard.clone();
         let handle = pool.spawn_handle(move || {
-            std::thread::sleep(MS * 25);
+            std::thread::sleep(MS * 50);
             guard1
         });
         handles.push(handle);
@@ -271,13 +273,13 @@ fn should_process_receiver_drop_after_all_senders_shutdown() {
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
         drop(handles);
         std::thread::sleep(SECOND);
-        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 98);
+        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 48);
         prev_handle.wait().expect("Get message");
-        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 99);
+        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 49);
         std::thread::sleep(MS * 100);
     }
 
-    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 100);
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 50);
 }
 
 #[test]

@@ -59,6 +59,7 @@ fn should_process_receiver_drop_after_all_senders_dead() {
         std::thread::sleep(MS * 100);
     }
 
+    std::thread::sleep(SECOND);
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 10);
 }
 

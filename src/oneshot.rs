@@ -21,7 +21,7 @@ enum Notifier {
 struct Payload<T> {
     state: AtomicU8,
     value: UnsafeCell<MaybeUninit<T>>,
-    notifier: Cell<Option<Notifier>>
+    notifier: Cell<MaybeUninit<Notifier>>
 }
 
 impl<T> Payload<T> {
@@ -29,7 +29,23 @@ impl<T> Payload<T> {
         Self {
             state: AtomicU8::new(UNINIT),
             value: UnsafeCell::new(MaybeUninit::uninit()),
-            notifier: Cell::new(None),
+            notifier: Cell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    #[inline(never)]
+    ///Sets notifier, updates state and returns previous state
+    fn set_notifier(&self, notifier: Notifier) -> u8 {
+        self.notifier.set(MaybeUninit::new(notifier));
+        self.state.fetch_or(WAKER_SET, Ordering::AcqRel)
+    }
+
+    #[inline(always)]
+    fn take_notifier(&self) -> Notifier {
+        let storage = self.notifier.replace(MaybeUninit::uninit());
+
+        unsafe {
+            storage.assume_init()
         }
     }
 }
@@ -42,6 +58,11 @@ impl<T> Drop for Payload<T> {
                 ptr::drop_in_place((*self.value.get()).as_mut_ptr());
             },
             _ => (),
+        }
+
+        //If no one is interested in waker, then just drop it without waking up
+        if state & WAKER_SET == WAKER_SET {
+            self.take_notifier();
         }
     }
 }
@@ -66,13 +87,12 @@ impl<T> Sender<T> {
 
         let state = self.payload().state.fetch_or(READY, Ordering::AcqRel);
         if state & WAKER_SET == WAKER_SET {
-            let notifier = self.payload().notifier.take();
+            let notifier = self.payload().take_notifier();
             self.payload().state.fetch_and(!WAKER_SET, Ordering::Release);
 
             match notifier {
-                Some(Notifier::Thread(thread)) => thread.unpark(),
-                Some(Notifier::Waker(waker)) => waker.wake(),
-                _ => unreachable!(),
+                Notifier::Thread(thread) => thread.unpark(),
+                Notifier::Waker(waker) => waker.wake(),
             }
         }
     }
@@ -83,14 +103,13 @@ impl<T> Drop for Sender<T> {
         //Make sure to guarantee we acquire RECV_CLOSED prior setting SEND_CLOSED
         let mut state = self.payload().state.load(Ordering::Acquire);
         if state & WAKER_SET == WAKER_SET {
-            let notifier = self.payload().notifier.take();
+            let notifier = self.payload().take_notifier();
             //Unset WAKER_SET and set SEND_CLOSED
             state = self.payload().state.fetch_xor(WAKER_SET | SEND_CLOSED, Ordering::AcqRel);
 
             match notifier {
-                Some(Notifier::Thread(thread)) => thread.unpark(),
-                Some(Notifier::Waker(waker)) => waker.wake(),
-                _ => unreachable!(),
+                Notifier::Thread(thread) => thread.unpark(),
+                Notifier::Waker(waker) => waker.wake(),
             }
         } else {
             state = self.payload().state.fetch_or(SEND_CLOSED, Ordering::AcqRel);
@@ -155,8 +174,7 @@ impl<T> Receiver<T> {
             return Err(JoinError::Disconnect);
         }
 
-        self.payload().notifier.set(Some(Notifier::Thread(std::thread::current())));
-        state = self.payload().state.fetch_or(WAKER_SET, Ordering::AcqRel);
+        state = self.payload().set_notifier(Notifier::Thread(std::thread::current()));
 
         while state & READY != READY {
             //Make sure we're not dropped yet
@@ -183,13 +201,16 @@ impl<T> Receiver<T> {
             return Err(JoinError::Disconnect);
         }
 
-        self.payload().notifier.set(Some(Notifier::Thread(std::thread::current())));
-        state = self.payload().state.fetch_or(WAKER_SET, Ordering::AcqRel);
+        state = self.payload().set_notifier(Notifier::Thread(std::thread::current()));
 
         if state & READY != READY {
             std::thread::park_timeout(time);
         }
         state = self.payload().state.fetch_and(!WAKER_SET, Ordering::AcqRel);
+
+        if state & WAKER_SET == WAKER_SET {
+            self.payload().take_notifier();
+        }
 
         if state & READY == READY {
             Ok(self.consume())
@@ -227,8 +248,7 @@ impl<T> Future for Receiver<T> {
         }
 
         if state & WAKER_SET != WAKER_SET {
-            self.payload().notifier.set(Some(Notifier::Waker(cx.waker().clone())));
-            state = self.payload().state.fetch_or(WAKER_SET, Ordering::AcqRel);
+            state = self.payload().set_notifier(Notifier::Waker(cx.waker().clone()));
         } else {
             state = self.payload().state.load(Ordering::Acquire);
         }
