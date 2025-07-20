@@ -68,6 +68,7 @@ impl<T> Drop for Payload<T> {
     }
 }
 
+#[repr(transparent)]
 ///Sender end, allows to send message once
 ///
 ///On `Drop` will notify `Receiver`
@@ -131,6 +132,7 @@ impl<T> Drop for Sender<T> {
 unsafe impl<T: Send> Send for Sender<T> {}
 unsafe impl<T: Sync> Sync for Sender<T> {}
 
+#[repr(transparent)]
 ///Receiver end to receive message
 ///
 ///Implements `Future`
@@ -155,6 +157,18 @@ impl<T> Receiver<T> {
 
             result.assume_init()
         }
+    }
+
+    #[inline(always)]
+    ///Returns whether job has been finished
+    pub fn is_ready(&self) -> bool {
+        self.payload().state.load(Ordering::Acquire) & READY == READY
+    }
+
+    #[inline(always)]
+    ///Returns whether receiver has been 'consumed'
+    pub fn is_consumed(&self) -> bool {
+        self.payload().state.load(Ordering::Acquire) & CONSUMED == CONSUMED
     }
 
     ///Checks if message is received, returning it, if possible

@@ -47,7 +47,7 @@
 #![allow(clippy::style)]
 
 use std::{thread, io, sync};
-use core::{time, fmt, ops};
+use core::{time, fmt, ops, future, pin, task};
 use core::sync::atomic::{Ordering, AtomicUsize, AtomicU16};
 
 mod utils;
@@ -67,6 +67,7 @@ pub enum JoinError {
     AlreadyConsumed,
 }
 
+#[repr(transparent)]
 ///Handle to the job, allowing to await for it to finish
 ///
 ///It provides methods to block current thread to wait for job to finish.
@@ -86,6 +87,12 @@ impl<T> fmt::Debug for JobHandle<T> {
 }
 
 impl<T> JobHandle<T> {
+    #[inline(always)]
+    ///Checks if the associated job has finished running.
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_ready()
+    }
+
     #[inline]
     ///Attempts to check of job is ready
     pub fn try_wait(&self) -> Result<Option<T>, JoinError> {
@@ -105,16 +112,16 @@ impl<T> JobHandle<T> {
     }
 }
 
-impl<T> core::future::Future for JobHandle<T> {
+impl<T> future::Future for JobHandle<T> {
     type Output = Result<T, JoinError>;
 
     #[inline]
-    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+    fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         let inner = unsafe {
             self.map_unchecked_mut(|this| &mut this.inner)
         };
 
-        core::future::Future::poll(inner, cx)
+        future::Future::poll(inner, cx)
     }
 }
 
