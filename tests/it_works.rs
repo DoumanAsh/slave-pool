@@ -1,4 +1,4 @@
-use core::time;
+use core::{time, task, future};
 use core::sync::atomic;
 use std::collections::HashSet;
 
@@ -154,6 +154,130 @@ fn should_handle_drop() {
     assert_eq!(pool.set_threads(0).unwrap(), 1);
     std::thread::sleep(MS * 100);
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn should_handle_drop_many() {
+    #[derive(Clone, Debug)]
+    struct Guard {
+        state: std::sync::Arc<atomic::AtomicUsize>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.state.fetch_add(1, atomic::Ordering::SeqCst);
+        }
+    }
+    let guard = Guard {
+        state: std::sync::Arc::new(atomic::AtomicUsize::new(0))
+    };
+
+    let pool = ThreadPool::new();
+    let mut handles = Vec::new();
+    for _ in 0..100 {
+        let guard1 = guard.clone();
+        let handle = pool.spawn_handle(move || {
+            std::thread::sleep(MS * 50);
+            guard1
+        });
+        handles.push(handle);
+    }
+
+    assert_eq!(pool.set_threads(2).unwrap(), 0);
+
+    let expected_counter = handles.len();
+    for (idx, handle) in handles.into_iter().enumerate() {
+        if idx % 2 == 0 {
+            drop(handle);
+        } else {
+            let _ = handle.wait();
+        }
+    }
+
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), expected_counter);
+}
+
+#[test]
+fn should_process_sender_drop_after_all_handles_dead() {
+    #[derive(Clone, Debug)]
+    struct Guard {
+        state: std::sync::Arc<atomic::AtomicUsize>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.state.fetch_add(1, atomic::Ordering::SeqCst);
+        }
+    }
+    let guard = Guard {
+        state: std::sync::Arc::new(atomic::AtomicUsize::new(0))
+    };
+
+    let mut pool = ThreadPool::new();
+    for _ in 0..100 {
+        let guard1 = guard.clone();
+        let handle = pool.spawn_handle(move || {
+            std::thread::sleep(MS * 50);
+            guard1
+        });
+        drop(handle);
+    }
+
+    pool.shutdown();
+    std::thread::sleep(MS * 100);
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 100);
+}
+
+#[test]
+fn should_process_receiver_drop_after_all_senders_shutdown() {
+    #[derive(Clone, Debug)]
+    struct Guard {
+        state: std::sync::Arc<atomic::AtomicUsize>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.state.fetch_add(1, atomic::Ordering::SeqCst);
+        }
+    }
+    let guard = Guard {
+        state: std::sync::Arc::new(atomic::AtomicUsize::new(0))
+    };
+
+    let mut pool = ThreadPool::new();
+    assert_eq!(pool.set_threads(4).unwrap(), 0);
+    let mut handles = Vec::new();
+    for _ in 0..100 {
+        let guard1 = guard.clone();
+        let handle = pool.spawn_handle(move || {
+            std::thread::sleep(MS * 25);
+            guard1
+        });
+        handles.push(handle);
+    }
+
+    pool.shutdown();
+
+    {
+        let last_handle = handles.pop().unwrap();
+        let waker = thread_waker::waker(std::thread::current());
+        let mut fut = core::pin::pin!(last_handle);
+        let mut context = task::Context::from_waker(&waker);
+        assert!(!future::Future::poll(fut.as_mut(), &mut context).is_ready());
+
+        let prev_handle = handles.pop().unwrap();
+
+        prev_handle.wait_timeout(MS * 10).expect_err("Should fail");
+        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
+        drop(handles);
+        std::thread::sleep(SECOND);
+        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 98);
+        prev_handle.wait().expect("Get message");
+        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 99);
+        std::thread::sleep(MS * 100);
+    }
+
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 100);
 }
 
 #[test]

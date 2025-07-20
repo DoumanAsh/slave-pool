@@ -14,3 +14,6 @@ include = [
 ]
 keywords = ["threadpool", "thread", "threading", "parallelism"]
 categories = ["concurrency"]
+
+[dev-dependencies.thread-waker]
+version = "1"

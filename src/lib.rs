@@ -216,10 +216,10 @@ impl ThreadPool {
     }
 
     #[inline(always)]
-    fn prepare_thread_builder(&self) -> thread::Builder {
+    fn prepare_thread_builder(&self, idx: u16) -> thread::Builder {
         let mut result = thread::Builder::new();
         if !self.name.is_empty() {
-            result = result.name(self.name.to_owned())
+            result = result.name(format!("{}-{idx}", self.name))
         }
         let stack_size = self.stack_size.load(Ordering::Relaxed);
         if stack_size != 0 {
@@ -261,15 +261,17 @@ impl ThreadPool {
 
             for num in 0..create_num {
                 let recv = state.recv.clone();
+                #[allow(clippy::while_let_loop)]
+                let worker_fn = move || loop {
+                    match recv.recv() {
+                        Ok(Message::Execute(job)) => {
+                            job();
+                        },
+                        Ok(Message::Shutdown) | Err(_) => break,
+                    }
+                };
 
-                let builder = self.prepare_thread_builder();
-                let result = builder.spawn(move || while let Ok(Message::Execute(job)) = recv.recv() {
-                    //TODO: for some reason closures has no impl, wonder why?
-                    let job = std::panic::AssertUnwindSafe(job);
-                    let _ = std::panic::catch_unwind(|| (job.0)());
-                });
-
-                match result {
+                match self.prepare_thread_builder(num).spawn(worker_fn) {
                     Ok(_) => (),
                     Err(error) => {
                         self.thread_num.store(old_thread_num.saturating_add(num), Ordering::Relaxed);
@@ -306,6 +308,12 @@ impl ThreadPool {
     ///Schedules new execution, sending it over to one of the workers.
     pub fn spawn<F: FnOnce() + Send + 'static>(&self, job: F) {
         let state = self.get_state();
+        let job = move || {
+            //TODO: for some reason closures has no impl, wonder why?
+            let job = std::panic::AssertUnwindSafe(job);
+            let _ = std::panic::catch_unwind(|| (job.0)());
+        };
+
         let _ = state.send.send(Message::Execute(Box::new(job)));
     }
 
@@ -313,7 +321,15 @@ impl ThreadPool {
     pub fn spawn_handle<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(&self, job: F) -> JobHandle<R> {
         let (send, recv) = oneshot::oneshot();
         let job = move || {
-            let _ = send.send(job());
+            //TODO: for some reason closures has no impl, wonder why?
+            let job = std::panic::AssertUnwindSafe(job);
+            match std::panic::catch_unwind(|| (job.0)()) {
+                Ok(result) => {
+                    let _ = send.send(result);
+                },
+                Err(_) => {
+                }
+            }
         };
         let _ = self.get_state().send.send(Message::Execute(Box::new(job)));
 
