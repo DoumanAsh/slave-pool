@@ -1,5 +1,6 @@
 //! Underlying oneshot implementation
-use core::{time, ptr, task, pin};
+use std::time;
+use core::{ptr, task, pin};
 use core::cell::{Cell, UnsafeCell};
 use core::mem::MaybeUninit;
 use core::sync::atomic::{Ordering, AtomicU8};
@@ -220,7 +221,7 @@ impl<T> Receiver<T> {
     ///Or if `Sender` closes unexpectedly (e.g. due to panic) returns `JoinError::Disconnect`
     ///
     ///If timeout expires, returns error `JoinError::Timeout`
-    pub fn recv_timeout(&self, time: time::Duration) -> Result<T, JoinError> {
+    pub fn recv_timeout(&self, mut time: time::Duration) -> Result<T, JoinError> {
         let mut state = self.payload().state.load(Ordering::Acquire);
 
         if state & CONSUMED == CONSUMED {
@@ -233,8 +234,17 @@ impl<T> Receiver<T> {
 
         state = self.payload().set_notifier(Notifier::Thread(std::thread::current()));
 
-        if state & READY != READY {
+        let start_time = time::Instant::now();
+        while state & READY != READY {
             std::thread::park_timeout(time);
+
+            if let Some(left_over) = time.checked_sub(start_time.elapsed()) {
+                //If any time left reload state to check flag again before entering new loop
+                time = left_over;
+                state = self.payload().state.load(Ordering::Acquire);
+            } else {
+                break;
+            }
         }
         state = self.payload().state.fetch_and(!WAKER_SET, Ordering::AcqRel);
 

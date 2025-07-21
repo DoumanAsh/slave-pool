@@ -42,6 +42,9 @@ fn should_spawn_and_complete_once_available() {
 
     assert_eq!(handle.wait_timeout(SECOND).unwrap(), 5);
     assert_eq!(handle.try_wait().unwrap_err(), JoinError::AlreadyConsumed);
+
+    assert_eq!(pool.set_threads(0).unwrap(), 4);
+    std::thread::sleep(SECOND);
 }
 
 #[test]
@@ -65,6 +68,9 @@ fn should_spawn_over_capacity() {
         assert!(ids.remove(&value), "Should not repeat");
         assert_eq!(handle.try_wait().unwrap_err(), JoinError::AlreadyConsumed);
     }
+
+    assert_eq!(pool.set_threads(0).unwrap(), 8);
+    std::thread::sleep(SECOND);
 }
 
 #[test]
@@ -92,6 +98,9 @@ fn should_spawn_and_over_capacity() {
             assert_eq!(handle.try_wait().unwrap_err(), JoinError::AlreadyConsumed);
         }
     }
+
+    assert_eq!(pool.set_threads(0).unwrap(), 8);
+    std::thread::sleep(SECOND);
 }
 
 #[test]
