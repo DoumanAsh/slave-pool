@@ -127,8 +127,15 @@ impl<T> future::Future for JobHandle<T> {
 
 enum Message {
     Execute(Box<dyn FnOnce() + Send + 'static>),
-    Shutdown,
+    Shutdown(Option<oneshot::Sender<()>>),
 }
+
+//Ensure size remains that of Box
+const _: () = {
+    assert!(core::mem::size_of::<Box<dyn FnOnce() + Send + 'static>>() == 16);
+    assert!(core::mem::size_of::<oneshot::Sender<()>>() == 8);
+    assert!(core::mem::size_of::<Message>() == 16);
+};
 
 //Since 1.67 mpsc uses mpmc under the hood so override shitty !Sync
 //Unfortunately it is also not transparent so I cannot transmute it into underlying mpmc for
@@ -257,7 +264,7 @@ impl ThreadPool {
 
             let shutdown_num = old_thread_num.saturating_sub(thread_num);
             for _ in 0..shutdown_num {
-                if state.send.send(Message::Shutdown).is_err() {
+                if state.send.send(Message::Shutdown(None)).is_err() {
                     break;
                 }
             }
@@ -268,13 +275,15 @@ impl ThreadPool {
 
             for num in 0..create_num {
                 let recv = state.recv.clone();
-                #[allow(clippy::while_let_loop)]
                 let worker_fn = move || loop {
                     match recv.recv() {
                         Ok(Message::Execute(job)) => {
                             job();
                         },
-                        Ok(Message::Shutdown) | Err(_) => break,
+                        Ok(Message::Shutdown(Some(notifier))) => {
+                            let _ = notifier.send(());
+                        }
+                        Ok(Message::Shutdown(None)) | Err(_) => break,
                     }
                 };
 
@@ -302,12 +311,39 @@ impl ThreadPool {
             let state = self.get_state();
 
             for _ in 0..old_thread_num {
-                if state.send.send(Message::Shutdown).is_err() {
+                if state.send.send(Message::Shutdown(None)).is_err() {
                     break;
                 }
             }
         }
 
+        //Take state and drop it
+        let _ = self.once_state.take();
+    }
+
+    ///Terminates all threads, awaiting their completion and clears internal state
+    ///
+    ///Mutable access guarantees that only one writer can clear state without need of internal lock
+    pub fn shutdown_and_join(&mut self) {
+        let _guard = self.thread_num_lock.lock();
+        let old_thread_num = self.thread_num.swap(0, Ordering::Relaxed);
+
+        let mut joiners = Vec::new();
+        {
+            let state = self.get_state();
+
+            for _ in 0..old_thread_num {
+                let (sender, receiver) = oneshot::oneshot();
+                if state.send.send(Message::Shutdown(Some(sender))).is_err() {
+                    break;
+                }
+                joiners.push(receiver);
+            }
+        }
+
+        for receiver in joiners {
+            let _ = receiver.recv();
+        }
         //Take state and drop it
         let _ = self.once_state.take();
     }

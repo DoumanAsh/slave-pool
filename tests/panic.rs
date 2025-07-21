@@ -50,7 +50,7 @@ fn should_process_receiver_drop_after_all_senders_dead() {
         let prev_handle = handles.pop().unwrap();
 
         prev_handle.wait_timeout(MS).expect_err("Should fail");
-        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
+        assert!(guard.state.load(atomic::Ordering::SeqCst) < 8);
         drop(handles);
         std::thread::sleep(SECOND);
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 8);

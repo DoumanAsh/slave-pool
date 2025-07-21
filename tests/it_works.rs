@@ -234,8 +234,7 @@ fn should_process_sender_drop_after_all_handles_dead() {
         drop(handle);
     }
 
-    pool.shutdown();
-    std::thread::sleep(MS * 100);
+    pool.shutdown_and_join();
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 100);
 }
 
@@ -302,13 +301,13 @@ fn should_shutdown_and_restart() {
         10
     });
 
-    pool.shutdown();
+    pool.shutdown_and_join();
 
     assert_eq!(pool.set_threads(2).unwrap(), 0);
 
     assert_eq!(handle.wait().expect("success"), 10);
 
-    pool.shutdown();
+    pool.shutdown_and_join();
 
     std::thread::sleep(MS * 100);
 }
