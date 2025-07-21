@@ -351,10 +351,10 @@ impl ThreadPool {
     ///Schedules new execution, sending it over to one of the workers.
     pub fn spawn<F: FnOnce() + Send + 'static>(&self, job: F) {
         let state = self.get_state();
+        //TODO: for some reason closures has no impl, wonder why?
+        let job = std::panic::AssertUnwindSafe(job);
         let job = move || {
-            //TODO: for some reason closures has no impl, wonder why?
-            let job = std::panic::AssertUnwindSafe(job);
-            let _ = std::panic::catch_unwind(|| (job.0)());
+            let _ = std::panic::catch_unwind(|| (job)());
         };
 
         let _ = state.send.send(Message::Execute(Box::new(job)));
@@ -363,10 +363,10 @@ impl ThreadPool {
     ///Schedules execution, that allows to await and receive it's result.
     pub fn spawn_handle<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(&self, job: F) -> JobHandle<R> {
         let (send, recv) = oneshot::oneshot();
+        //TODO: for some reason closures has no impl, wonder why?
+        let job = std::panic::AssertUnwindSafe(job);
         let job = move || {
-            //TODO: for some reason closures has no impl, wonder why?
-            let job = std::panic::AssertUnwindSafe(job);
-            match std::panic::catch_unwind(|| (job.0)()) {
+            match std::panic::catch_unwind(|| (job)()) {
                 Ok(result) => {
                     let _ = send.send(result);
                 },

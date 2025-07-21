@@ -257,10 +257,11 @@ fn should_process_receiver_drop_after_all_senders_shutdown() {
     let mut pool = ThreadPool::new();
     assert_eq!(pool.set_threads(4).unwrap(), 0);
     let mut handles = Vec::new();
-    for _ in 0..50 {
+    for _ in 0..80 {
         let guard1 = guard.clone();
         let handle = pool.spawn_handle(move || {
             std::thread::sleep(MS * 50);
+            std::thread::yield_now();
             guard1
         });
         handles.push(handle);
@@ -281,13 +282,13 @@ fn should_process_receiver_drop_after_all_senders_shutdown() {
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
         drop(handles);
         std::thread::sleep(SECOND);
-        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 48);
+        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 78);
         prev_handle.wait().expect("Get message");
-        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 49);
+        assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 79);
         std::thread::sleep(MS * 100);
     }
 
-    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 50);
+    assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 80);
 }
 
 #[test]
