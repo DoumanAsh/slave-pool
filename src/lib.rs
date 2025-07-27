@@ -21,7 +21,7 @@
 //! POOL.set_threads(0); //Tells to shut down threads
 //!
 //! for (idx, handle) in handles.drain(..).enumerate() {
-//!     assert_eq!(handle.wait().unwrap(), idx) //Even though we told  it to shutdown all threads, it is going to finish queued job first
+//!     assert_eq!(handle.wait().unwrap().expect("no panic"), idx) //Even though we told  it to shutdown all threads, it is going to finish queued job first
 //! }
 //!
 //! let handle = POOL.spawn_handle(|| {});
@@ -29,17 +29,17 @@
 //!
 //! POOL.set_threads(1); //But let's add one more
 //!
-//! assert!(handle.wait().is_ok());
+//! assert!(handle.wait().unwrap().is_ok());
 //!
 //! let handle = POOL.spawn_handle(|| panic!("Oh no!")); // We can panic, if we want
 //!
-//! assert!(handle.wait().is_err()); // In that case we'll get error, but thread will be ok
+//! assert!(handle.wait().unwrap().is_err()); // In that case we'll get error, but thread will be ok
 //!
 //! let handle = POOL.spawn_handle(|| {});
 //!
 //! POOL.set_threads(0);
 //!
-//! assert!(handle.wait().is_ok());
+//! assert!(handle.wait().unwrap().is_ok());
 //! std::thread::sleep(SECOND);
 //! ```
 
@@ -50,6 +50,7 @@ use std::{thread, io, sync};
 use core::{time, fmt, ops, future, pin, task};
 use core::sync::atomic::{Ordering, AtomicUsize, AtomicU16};
 
+pub mod panic;
 mod utils;
 mod spin;
 pub mod oneshot;
@@ -352,27 +353,24 @@ impl ThreadPool {
     pub fn spawn<F: FnOnce() + Send + 'static>(&self, job: F) {
         let state = self.get_state();
         //TODO: for some reason closures has no impl, wonder why?
-        let job = std::panic::AssertUnwindSafe(job);
+        let job = panic::AssertUnwindSafe(job);
         let job = move || {
-            let _ = std::panic::catch_unwind(|| (job)());
+            let _ = panic::catch_unwind(|| (job)());
         };
 
         let _ = state.send.send(Message::Execute(Box::new(job)));
     }
 
     ///Schedules execution, that allows to await and receive it's result.
-    pub fn spawn_handle<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(&self, job: F) -> JobHandle<R> {
+    pub fn spawn_handle<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(&self, job: F) -> JobHandle<Result<R, panic::Panic>> {
         let (send, recv) = oneshot::oneshot();
         //TODO: for some reason closures has no impl, wonder why?
-        let job = std::panic::AssertUnwindSafe(job);
+        let job = panic::AssertUnwindSafe(job);
         let job = move || {
-            match std::panic::catch_unwind(|| (job)()) {
-                Ok(result) => {
-                    let _ = send.send(result);
-                },
-                Err(_) => {
-                }
-            }
+            let _ = match panic::catch_unwind(|| (job)()) {
+                Ok(result) => send.send(Ok(result)),
+                Err(error) => send.send(Err(panic::Panic(error))),
+            };
         };
         let _ = self.get_state().send.send(Message::Execute(Box::new(job)));
 

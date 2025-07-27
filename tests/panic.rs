@@ -54,7 +54,7 @@ fn should_process_receiver_drop_after_all_senders_dead() {
         drop(handles);
         std::thread::sleep(SECOND);
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 8);
-        prev_handle.wait().expect("Get message");
+        prev_handle.wait().expect("Get message").expect("no panic");
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 9);
         std::thread::sleep(MS * 100);
     }

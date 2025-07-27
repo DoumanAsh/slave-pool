@@ -295,10 +295,12 @@ impl<T> Future for Receiver<T> {
         }
 
         //Just in case double-check
-        if state & SEND_CLOSED == SEND_CLOSED {
-            task::Poll::Ready(Err(JoinError::Disconnect))
+        if state & CONSUMED == CONSUMED {
+            return task::Poll::Ready(Err(JoinError::AlreadyConsumed));
         } else if state & READY == READY {
-            task::Poll::Ready(Ok(self.consume()))
+            return task::Poll::Ready(Ok(self.consume()));
+        } else if state & SEND_CLOSED == SEND_CLOSED {
+            return task::Poll::Ready(Err(JoinError::Disconnect));
         } else {
             task::Poll::Pending
         }
