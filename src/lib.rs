@@ -118,9 +118,7 @@ impl<T> future::Future for JobHandle<T> {
 
     #[inline]
     fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        let inner = unsafe {
-            self.map_unchecked_mut(|this| &mut this.inner)
-        };
+        let inner = pin::Pin::new(&mut self.get_mut().inner);
 
         future::Future::poll(inner, cx)
     }
