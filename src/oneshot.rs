@@ -220,14 +220,14 @@ impl<T> Receiver<T> {
     ///Awaits message blocking for the duration of `time` until message arrives, returning it
     ///Or if `Sender` closes unexpectedly (e.g. due to panic) returns `JoinError::Disconnect`
     ///
-    ///If timeout expires, returns error `JoinError::Timeout`
-    pub fn recv_timeout(&self, mut time: time::Duration) -> Result<T, JoinError> {
+    ///If timeout expires, returns `Ok(None)`
+    pub fn recv_timeout(&self, mut time: time::Duration) -> Result<Option<T>, JoinError> {
         let mut state = self.payload().state.load(Ordering::Acquire);
 
         if state & CONSUMED == CONSUMED {
             return Err(JoinError::AlreadyConsumed);
         } else if state & READY == READY {
-            return Ok(self.consume());
+            return Ok(Some(self.consume()));
         } else if state & SEND_CLOSED == SEND_CLOSED {
             return Err(JoinError::Disconnect);
         }
@@ -253,9 +253,9 @@ impl<T> Receiver<T> {
         }
 
         if state & READY == READY {
-            Ok(self.consume())
+            Ok(Some(self.consume()))
         } else {
-            Err(JoinError::Timeout)
+            Ok(None)
         }
     }
 }

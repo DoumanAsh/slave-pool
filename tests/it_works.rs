@@ -20,7 +20,7 @@ fn it_works() {
             5
         });
 
-        assert_eq!(handle.wait_timeout(SECOND).unwrap().expect("no panic"), 5);
+        assert_eq!(handle.wait_timeout(SECOND).unwrap().expect("value present"), 5);
     }
 
     std::thread::sleep(SECOND);
@@ -34,13 +34,13 @@ fn should_spawn_and_complete_once_available() {
         std::thread::sleep(core::time::Duration::from_millis(100));
         5
     });
-    assert!(handle.wait_timeout(SECOND).is_err());
+    assert!(handle.wait_timeout(SECOND).unwrap().is_none(), "should timeout");
     assert!(handle.try_wait().unwrap().is_none());
 
     assert_eq!(pool.set_threads(8).unwrap(), 0);
     assert_eq!(pool.set_threads(4).unwrap(), 8);
 
-    assert_eq!(handle.wait_timeout(SECOND).unwrap().expect("no panic"), 5);
+    assert_eq!(handle.wait_timeout(SECOND).unwrap().expect("value present"), 5);
     assert_eq!(handle.try_wait().unwrap_err(), JoinError::AlreadyConsumed);
 
     assert_eq!(pool.set_threads(0).unwrap(), 4);
@@ -64,7 +64,7 @@ fn should_spawn_over_capacity() {
     }
 
     for handle in handles.into_iter() {
-        let value = handle.wait_timeout(SECOND).unwrap().expect("no panic");
+        let value = handle.wait_timeout(SECOND).unwrap().expect("value present");
         assert!(ids.remove(&value), "Should not repeat");
         assert_eq!(handle.try_wait().unwrap_err(), JoinError::AlreadyConsumed);
     }
@@ -93,7 +93,7 @@ fn should_spawn_and_over_capacity() {
         if idx % 2 == 0 {
             drop(handle);
         } else {
-            let value = handle.wait_timeout(SECOND).unwrap().expect("no panic");
+            let value = handle.wait_timeout(SECOND).expect("get value").expect("value present");
             assert!(ids.remove(&value), "Should not repeat");
             assert_eq!(handle.try_wait().unwrap_err(), JoinError::AlreadyConsumed);
         }
@@ -126,7 +126,7 @@ fn should_handle_drop() {
     let handle = pool.spawn_handle(move || {
         guard1
     });
-    assert_eq!(handle.wait_timeout(MS).unwrap_err(), JoinError::Timeout);
+    assert!(handle.wait_timeout(MS).expect("no error").is_none(), "Should not come in time");
     assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
 
     drop(handle);
@@ -280,13 +280,13 @@ fn should_process_receiver_drop_after_all_senders_shutdown() {
 
         let prev_handle = handles.pop().unwrap();
 
-        prev_handle.wait_timeout(MS * 10).expect_err("Should fail");
+        assert!(prev_handle.wait_timeout(MS * 10).unwrap().is_none(), "Should fail");
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 0);
         drop(handles);
 
         std::thread::sleep(SECOND + (MS * 100));
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 78);
-        prev_handle.wait().expect("Get message").expect("no panic");
+        prev_handle.wait().expect("Get message");
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 79);
         std::thread::sleep(MS * 100);
     }
@@ -295,9 +295,9 @@ fn should_process_receiver_drop_after_all_senders_shutdown() {
     //miri is too useless for timing tests
     {
         let fut = handles.pop().unwrap();
-        thread_waker::block_on(fut).expect("success").expect("no panic");
+        thread_waker::block_on(fut).expect("success");
         for handle in handles {
-            handle.wait().expect("Get message").expect("no panic");
+            handle.wait().expect("Get message");
         }
     }
 
@@ -319,7 +319,7 @@ fn should_shutdown_and_restart() {
 
     assert_eq!(pool.set_threads(2).unwrap(), 0);
 
-    assert_eq!(handle.wait().expect("success").expect("no panic"), 10);
+    assert_eq!(handle.wait().expect("success"), 10);
 
     pool.shutdown_and_join();
 

@@ -27,7 +27,7 @@ for idx in 0..8 {
 POOL.set_threads(0); //Tells to shut down threads
 
 for (idx, handle) in handles.drain(..).enumerate() {
-    assert_eq!(handle.wait().unwrap().expect("no panic"), idx) //Even though we told  it to shutdown all threads, it is going to finish queued job first
+    assert_eq!(handle.wait().unwrap(), idx) //Even though we told  it to shutdown all threads, it is going to finish queued job first
 }
 
 let handle = POOL.spawn_handle(|| {});
@@ -35,16 +35,16 @@ assert!(handle.wait_timeout(SECOND).is_err()); // All are shutdown now
 
 POOL.set_threads(1); //But let's add one more
 
-assert!(handle.wait().unwrap().is_ok());
+assert!(handle.wait().is_ok());
 
 let handle = POOL.spawn_handle(|| panic!("Oh no!")); // We can panic, if we want
 
-assert!(handle.wait().unwrap().is_err()); // In that case we'll get error, but thread will be ok
+assert!(handle.wait().is_err()); // In that case we'll get error, but thread will be ok
 
 let handle = POOL.spawn_handle(|| {});
 
 POOL.set_threads(0);
 
-assert!(handle.wait().unwrap().is_ok());
+assert!(handle.wait().is_ok());
 std::thread::sleep(SECOND);
 ```

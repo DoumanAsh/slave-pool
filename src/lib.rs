@@ -21,7 +21,7 @@
 //! POOL.set_threads(0); //Tells to shut down threads
 //!
 //! for (idx, handle) in handles.drain(..).enumerate() {
-//!     assert_eq!(handle.wait().unwrap().expect("no panic"), idx) //Even though we told  it to shutdown all threads, it is going to finish queued job first
+//!     assert_eq!(handle.wait().unwrap(), idx) //Even though we told  it to shutdown all threads, it is going to finish queued job first
 //! }
 //!
 //! let handle = POOL.spawn_handle(|| {});
@@ -29,17 +29,17 @@
 //!
 //! POOL.set_threads(1); //But let's add one more
 //!
-//! assert!(handle.wait().unwrap().is_ok());
+//! assert!(handle.wait().is_ok());
 //!
 //! let handle = POOL.spawn_handle(|| panic!("Oh no!")); // We can panic, if we want
 //!
-//! assert!(handle.wait().unwrap().is_err()); // In that case we'll get error, but thread will be ok
+//! assert!(handle.wait().is_err()); // In that case we'll get error, but thread will be ok
 //!
 //! let handle = POOL.spawn_handle(|| {});
 //!
 //! POOL.set_threads(0);
 //!
-//! assert!(handle.wait().unwrap().is_ok());
+//! assert!(handle.wait().is_ok());
 //! std::thread::sleep(SECOND);
 //! ```
 
@@ -50,7 +50,6 @@ use std::{thread, io, sync};
 use core::{time, fmt, ops, future, pin, task};
 use core::sync::atomic::{Ordering, AtomicUsize, AtomicU16};
 
-pub mod panic;
 mod utils;
 mod spin;
 pub mod oneshot;
@@ -60,8 +59,6 @@ pub mod oneshot;
 pub enum JoinError {
     ///Job wasn't finished and aborted.
     Disconnect,
-    ///Timeout expired, job continues.
-    Timeout,
     ///Job was already consumed.
     ///
     ///Only possible if handle successfully finished with one of the `wait` or via reference future.
@@ -108,7 +105,7 @@ impl<T> JobHandle<T> {
 
     #[inline]
     ///Awaits for job to finish for limited time.
-    pub fn wait_timeout(&self, timeout: time::Duration) -> Result<T, JoinError> {
+    pub fn wait_timeout(&self, timeout: time::Duration) -> Result<Option<T>, JoinError> {
         self.inner.recv_timeout(timeout)
     }
 }
@@ -159,7 +156,61 @@ struct State {
     recv: sync::Arc<Receiver<Message>>,
 }
 
-unsafe impl Sync for ThreadPool {}
+#[derive(Clone)]
+struct ThreadBuilder {
+    idx: u16,
+    name: &'static str,
+    stack_size: usize,
+    receiver: sync::Arc<Receiver<Message>>,
+}
+
+impl ThreadBuilder {
+    pub fn spawn(self) -> Result<thread::JoinHandle<()>, io::Error> {
+        let mut result = thread::Builder::new();
+        if !self.name.is_empty() {
+            result = result.name(format!("{}-{}", self.name, self.idx))
+        }
+        if self.stack_size != 0 {
+            result = result.stack_size(self.stack_size)
+        }
+        let recv = self.receiver.clone();
+
+        //Builder should be taken out to prevent re-spawn
+        let mut guard = ThreadGuard(Some(self));
+        let worker_fn = move || loop {
+            match recv.recv() {
+                Ok(Message::Execute(job)) => {
+                    job();
+                },
+                Ok(Message::Shutdown(Some(notifier))) => {
+                    guard.0.take();
+                    let _ = notifier.send(());
+                    break;
+                }
+                Ok(Message::Shutdown(None)) | Err(_) => {
+                    guard.0.take();
+                    break;
+                },
+            }
+        };
+
+        result.spawn(worker_fn)
+    }
+}
+
+#[repr(transparent)]
+struct ThreadGuard(Option<ThreadBuilder>);
+
+impl Drop for ThreadGuard {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            if let Some(builder) = self.0.take() {
+                //At this point if we cannot respawn thread there is something utterly wrong, so do not double panic
+                let _ = builder.spawn();
+            }
+        }
+    }
+}
 
 ///Thread pool that allows to change number of threads at runtime.
 ///
@@ -228,19 +279,6 @@ impl ThreadPool {
         self.stack_size.swap(stack_size, Ordering::AcqRel)
     }
 
-    #[inline(always)]
-    fn prepare_thread_builder(&self, idx: u16) -> thread::Builder {
-        let mut result = thread::Builder::new();
-        if !self.name.is_empty() {
-            result = result.name(format!("{}-{idx}", self.name))
-        }
-        let stack_size = self.stack_size.load(Ordering::Relaxed);
-        if stack_size != 0 {
-            result = result.stack_size(stack_size)
-        }
-        result
-    }
-
     ///Sets worker number, starting new threads if it is greater than previous
     ///
     ///In case if it is less, extra threads are shut down.
@@ -273,20 +311,14 @@ impl ThreadPool {
             let state = self.get_state();
 
             for num in 0..create_num {
-                let recv = state.recv.clone();
-                let worker_fn = move || loop {
-                    match recv.recv() {
-                        Ok(Message::Execute(job)) => {
-                            job();
-                        },
-                        Ok(Message::Shutdown(Some(notifier))) => {
-                            let _ = notifier.send(());
-                        }
-                        Ok(Message::Shutdown(None)) | Err(_) => break,
-                    }
+                let builder = ThreadBuilder {
+                    idx: num,
+                    stack_size: self.stack_size.load(Ordering::Relaxed),
+                    name: self.name,
+                    receiver: state.recv.clone(),
                 };
 
-                match self.prepare_thread_builder(num).spawn(worker_fn) {
+                match builder.spawn() {
                     Ok(_) => (),
                     Err(error) => {
                         self.thread_num.store(old_thread_num.saturating_add(num), Ordering::Relaxed);
@@ -350,25 +382,14 @@ impl ThreadPool {
     ///Schedules new execution, sending it over to one of the workers.
     pub fn spawn<F: FnOnce() + Send + 'static>(&self, job: F) {
         let state = self.get_state();
-        //TODO: for some reason closures has no impl, wonder why?
-        let job = panic::AssertUnwindSafe(job);
-        let job = move || {
-            let _ = panic::catch_unwind(|| (job)());
-        };
-
         let _ = state.send.send(Message::Execute(Box::new(job)));
     }
 
     ///Schedules execution, that allows to await and receive it's result.
-    pub fn spawn_handle<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(&self, job: F) -> JobHandle<Result<R, panic::Panic>> {
+    pub fn spawn_handle<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(&self, job: F) -> JobHandle<R> {
         let (send, recv) = oneshot::oneshot();
-        //TODO: for some reason closures has no impl, wonder why?
-        let job = panic::AssertUnwindSafe(job);
         let job = move || {
-            let _ = match panic::catch_unwind(|| (job)()) {
-                Ok(result) => send.send(Ok(result)),
-                Err(error) => send.send(Err(panic::Panic(error))),
-            };
+            let _ = send.send((job)());
         };
         let _ = self.get_state().send.send(Message::Execute(Box::new(job)));
 
@@ -391,3 +412,6 @@ impl fmt::Debug for ThreadPool {
         fmt.write_fmt(format_args!("ThreadPool {{ threads: {} }}", self.thread_num.load(Ordering::Relaxed)))
     }
 }
+
+unsafe impl Sync for ThreadPool {}
+

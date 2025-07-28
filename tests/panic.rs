@@ -7,6 +7,40 @@ const MS: time::Duration = time::Duration::from_millis(1);
 const SECOND: time::Duration = time::Duration::from_secs(1);
 
 #[test]
+fn should_verify_worker_restart_after_panic() {
+    let mut pool = ThreadPool::with_defaults("revived-worker", 0);
+    assert_eq!(pool.set_threads(1).unwrap(), 0);
+
+    let mut handles = Vec::new();
+    for idx in 0..10 {
+        let handle = pool.spawn_handle(move || {
+            if idx < 9 {
+                panic!("oh no: {idx}");
+            }
+        });
+        handles.push(handle);
+    }
+
+    let mut success = 0;
+    let mut disconnects = 0;
+    for handle in handles {
+        match handle.wait() {
+            Ok(()) => {
+                success += 1;
+            },
+            Err(slave_pool::JoinError::Disconnect) => {
+                disconnects += 1;
+            },
+            Err(slave_pool::JoinError::AlreadyConsumed) => panic!("Unexpected error AlreadyConsumed"),
+        }
+    }
+
+    assert_eq!(success, 1);
+    assert_eq!(disconnects, 9);
+    pool.shutdown_and_join();
+}
+
+#[test]
 fn should_process_receiver_drop_after_all_senders_dead() {
     #[derive(Clone, Debug)]
     struct Guard {
@@ -49,12 +83,12 @@ fn should_process_receiver_drop_after_all_senders_dead() {
 
         let prev_handle = handles.pop().unwrap();
 
-        prev_handle.wait_timeout(MS).expect_err("Should fail");
+        assert!(prev_handle.wait_timeout(MS).unwrap().is_none(), "should timeout");
         assert!(guard.state.load(atomic::Ordering::SeqCst) < 8);
         drop(handles);
         std::thread::sleep(SECOND);
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 8);
-        prev_handle.wait().expect("Get message").expect("no panic");
+        prev_handle.wait().expect("Get message");
         assert_eq!(guard.state.load(atomic::Ordering::SeqCst), 9);
         std::thread::sleep(MS * 100);
     }

@@ -88,12 +88,12 @@ fn should_correctly_error_on_send_dropped_after_try() {
 fn should_correctly_receive_after_timeout() {
     let (sender, receiver) = oneshot::oneshot();
 
-    let error = receiver.recv_timeout(TIMEOUT).expect_err("should timeout");
-    assert_eq!(error, JoinError::Timeout);
+    let timeout = receiver.recv_timeout(TIMEOUT).expect("no disconnect");
+    assert!(timeout.is_none(), "Should timeout");
 
     sender.send("should_be_received".to_owned());
 
-    let result = receiver.recv_timeout(TIMEOUT).expect("ok");
+    let result = receiver.recv_timeout(TIMEOUT).expect("ok").expect("to have value");
     assert_eq!(result, "should_be_received");
 }
 
@@ -101,8 +101,8 @@ fn should_correctly_receive_after_timeout() {
 fn should_correctly_drop_receiver_after_timeout() {
     let (sender, receiver) = oneshot::oneshot();
 
-    let error = receiver.recv_timeout(TIMEOUT).expect_err("should timeout");
-    assert_eq!(error, JoinError::Timeout);
+    let timeout = receiver.recv_timeout(TIMEOUT).expect("no disconnect");
+    assert!(timeout.is_none(), "Should timeout");
 
     sender.send("should_be_dropped".to_owned());
 }
@@ -111,8 +111,8 @@ fn should_correctly_drop_receiver_after_timeout() {
 fn should_correctly_error_on_send_dropped_after_timeout() {
     let (sender, receiver) = oneshot::oneshot::<String>();
 
-    let error = receiver.recv_timeout(TIMEOUT).expect_err("should timeout");
-    assert_eq!(error, JoinError::Timeout);
+    let timeout = receiver.recv_timeout(TIMEOUT).expect("no disconnect");
+    assert!(timeout.is_none(), "Should timeout");
     drop(sender);
 
     let error = receiver.recv_timeout(TIMEOUT).expect_err("should disconnect");
